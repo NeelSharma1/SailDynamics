@@ -1,5 +1,58 @@
+# Generated simulation results and plots
+/output/
+
+# Python environments and local credentials
 .venv/
+venv/
+env/
+ENV/
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+
+# Python bytecode and caches
 __pycache__/
-*.egg-info/
+*.py[cod]
+*$py.class
+.cache/
+.ipynb_checkpoints/
+.matplotlib/
+.mplconfig/
+
+# Test, coverage, and analysis artifacts
 .pytest_cache/
-output/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Packaging and build artifacts (keep pyproject.toml and uv.lock tracked)
+/build/
+/dist/
+.eggs/
+*.egg
+*.egg-info/
+pip-wheel-metadata/
+
+# Local IDE settings and editor temporary files
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+
+# Logs and OS metadata
+*.log
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
