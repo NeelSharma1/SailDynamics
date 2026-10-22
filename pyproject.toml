@@ -1,0 +1,19 @@
+[project]
+name = "sail-dynamics"
+version = "0.1.0"
+description = "Triangular-facet solar radiation pressure explorer in low Earth orbit"
+requires-python = ">=3.11"
+dependencies = ["numpy>=2.0", "matplotlib>=3.9"]
+
+[project.scripts]
+sail-dynamics = "sail_sim:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["sail_sim"]
+
+[tool.setuptools.packages.find]
+include = ["sail_dynamics*"]

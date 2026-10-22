@@ -1,0 +1,141 @@
+"""Spatial shadow loads, contact discovery, conservative search, reproducibility."""
+import csv
+from dataclasses import replace
+import json
+from pathlib import Path
+import tempfile
+import unittest
+
+import numpy as np
+from numpy.testing import assert_allclose
+
+from sail_dynamics import Config
+from sail_dynamics.environment import environment
+from sail_dynamics.illumination import SpatialLoadEvaluator
+from sail_dynamics.monte_carlo import StudySettings, run_study, METRICS, magnitudes
+from sail_dynamics.sail import Sail, Hub
+from sail_dynamics.sail.wrinkles import StochasticWrinkleField
+from sail_dynamics.sampling import eclipse_refinement_times, time_grid
+from sail_dynamics.frames.sail_body import SailBodyFrame
+from sail_dynamics.shadows import visible_sun_fraction
+
+
+class SpatialLoadTests(unittest.TestCase):
+    def setUp(self):
+        self.config = Config(radial_cells=4, angular_segments=16, wrinkle_m=0)
+        self.evaluator = SpatialLoadEvaluator(self.config, Sail(self.config), Hub(self.config))
+
+    def test_flat_sail_acquires_eclipse_torque(self):
+        times, events = eclipse_refinement_times(self.config, 86400, .25)
+        self.assertGreater(events, 0)
+        env = environment(times, self.config)
+        i = int(np.argmin(np.abs(env.sunlight-.5)))
+        point = self.evaluator.snapshot(times[i])
+        self.assertGreater(float(np.ptp(point.sunlight)), 1e-5)
+        self.assertGreater(float(np.linalg.norm(point.loads.torques_body)), 1e-8)
+        self.assertLess(float(np.linalg.norm(self.evaluator.sail.unit_torque)), 1e-18)
+        direct_forces = point.beam_flux[:, None]*self.evaluator.unit_forces
+        direct_moments = np.cross(self.evaluator.centers-np.asarray(self.config.attachment_m), direct_forces)
+        assert_allclose(point.loads.forces_body, direct_forces.sum(axis=0), atol=1e-17)
+        assert_allclose(point.loads.torques_body, direct_moments.sum(axis=0), atol=1e-17)
+
+    def test_bounds_enclose_each_facet_and_all_loads(self):
+        case = replace(self.config, diameter_m=100, wrinkle_m=1, wrinkle_model='stochastic')
+        evaluator = SpatialLoadEvaluator(case, Sail(case), Hub(case))
+        times, _ = eclipse_refinement_times(case, 86400, .5)
+        env = environment(times[::3], case)
+        low, high = evaluator.illumination_bounds(env)
+        _, fractions = evaluator.facet_flux(env)
+        self.assertTrue(np.all(fractions >= low[:, None]-1e-9))
+        self.assertTrue(np.all(fractions <= high[:, None]+1e-9))
+        actual = magnitudes(evaluator.loads(env))
+        bounds = evaluator.magnitude_upper_bounds(env)
+        self.assertTrue(np.all(actual <= bounds+1e-12))
+
+    def test_vectorized_and_scalar_spatial_loads_agree(self):
+        times, _ = eclipse_refinement_times(self.config, 86400, 1)
+        chosen = times[::max(1, len(times)//12)]
+        vector = self.evaluator.loads(environment(chosen, self.config))
+        for i, time in enumerate(chosen):
+            point = self.evaluator.snapshot(time)
+            assert_allclose(vector.forces_body[i], point.loads.forces_body, atol=1e-17)
+            assert_allclose(vector.torques_body[i], point.loads.torques_body, atol=1e-17)
+
+    def test_body_frame_shadow_algebra_matches_direct_inertial_geometry(self):
+        case = replace(self.config, wrinkle_m=.2, wrinkle_model='stochastic')
+        evaluator = SpatialLoadEvaluator(case, Sail(case), Hub(case))
+        times, _ = eclipse_refinement_times(case, 7200, .5)
+        env = environment(times, case)
+        offsets = np.einsum('tij,fj->tfi', SailBodyFrame(env.sun_unit).rotation_to_geocentric,
+                            evaluator.centers)
+        observers = env.satellite_m[:, None, :]+offsets
+        sun = env.satellite_m+env.sun_unit*env.distance_m[:, None]
+        direct = visible_sun_fraction(observers, sun[:, None, :])
+        _, algebraic = evaluator.facet_flux(env)
+        assert_allclose(algebraic, direct, atol=5e-8, rtol=0)
+
+    def test_refinement_catches_between_minute_penumbra(self):
+        times, _ = eclipse_refinement_times(self.config, 7200, .25)
+        fine_times = np.arange(0, 7200, .2)
+        fraction = environment(fine_times, self.config).sunlight
+        partial = fine_times[(fraction > .05) & (fraction < .95)]
+        self.assertGreater(len(partial), 0)
+        indices = np.clip(np.searchsorted(times, partial), 1, len(times)-1)
+        distance = np.minimum(np.abs(times[indices]-partial), np.abs(times[indices-1]-partial))
+        self.assertLess(float(distance.max()), .251)
+
+
+class MonteCarloTests(unittest.TestCase):
+    def test_random_pattern_periodicity_bound_and_seed(self):
+        r, theta = np.meshgrid(np.linspace(0, 1, 13), np.linspace(0, 2*np.pi, 49), indexing='ij')
+        field = StochasticWrinkleField(.2, 7)
+        height = field.heights(r, theta)
+        assert_allclose(height[:, 0], height[:, -1], atol=1e-14)
+        assert_allclose(height[[0, -1]], 0)
+        self.assertAlmostEqual(np.max(np.abs(height)), .2)
+        assert_allclose(field.heights(r, theta), height)
+        self.assertGreater(np.max(np.abs(StochasticWrinkleField(.2, 8).heights(r, theta)-height)), .01)
+
+    def test_pruned_search_matches_unpruned_grid_and_exports(self):
+        config = Config(radial_cells=4, angular_segments=16)
+        settings = StudySettings(trials=3, duration_days=.09, refine_step_s=.5)
+        result = run_study(config, settings)
+        refined, _ = eclipse_refinement_times(config, .09*86400, .5,
+                                               np.hypot(config.diameter_m/2, settings.max_wrinkle_m))
+        all_times = np.unique(np.r_[result.minutes, refined])
+        self.assertEqual(result.trials[0]['wrinkle_m'], 0)
+        self.assertEqual(result.trials[1]['wrinkle_m'], settings.max_wrinkle_m)
+        self.assertTrue(np.all(np.diff(result.minutes) <= 60))
+        for row in result.trials:
+            case = replace(config, seed=row['pattern_seed'], wrinkle_m=row['wrinkle_m'],
+                           wrinkle_model='stochastic')
+            evaluator = SpatialLoadEvaluator(case, Sail(case), Hub(case))
+            brute = magnitudes(evaluator.loads(environment(all_times, case))).max(axis=0)
+            for j, metric in enumerate(METRICS):
+                self.assertAlmostEqual(row['max_'+metric], brute[j], delta=1e-12)
+                self.assertLessEqual(row['max_'+metric], row['upper_bound_'+metric]+1e-12)
+        # Flat anchor: subminute penumbra produces a torque missing from most minute samples.
+        self.assertGreater(result.trials[0]['max_assembly_torque_Nm'], 1e-8)
+        with tempfile.TemporaryDirectory() as directory:
+            result.export(directory)
+            report = json.loads((Path(directory)/'summary.json').read_text())
+            self.assertEqual(report['minute_epochs'], len(result.minutes))
+            with (Path(directory)/'minute_envelope.csv').open() as stream:
+                records = list(csv.DictReader(stream))
+            self.assertEqual(len(records), len(result.minutes))
+            data = np.load(Path(directory)/'assembly_torque_Nm_peak.npz')
+            self.assertAlmostEqual(np.linalg.norm(data['torque_body_Nm']),
+                                   result.peaks['assembly_torque_Nm']['magnitude'])
+        again = run_study(config, settings)
+        self.assertEqual(result.trials, again.trials)
+        self.assertEqual(result.peaks, again.peaks)
+
+    def test_invalid_study_parameters(self):
+        for kwargs in ({'trials': 1}, {'min_wrinkle_m': -.1}, {'max_wrinkle_m': -.1},
+                       {'refine_step_s': 0}, {'duration_days': -1}, {'seed': -1}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                StudySettings(**kwargs)
+
+
+if __name__ == '__main__':
+    unittest.main()
