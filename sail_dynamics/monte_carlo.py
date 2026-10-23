@@ -35,7 +35,8 @@ class StudySettings:
     min_wrinkle_m: float = 0.0
     max_wrinkle_m: float = .18
     duration_days: float | None = None
-    refine_step_s: float = .25
+    refine_step_s: float = 10.0
+    duration_orbits: float | None = None
 
     def __post_init__(self):
         if not isinstance(self.trials, int) or self.trials < 2:
@@ -46,10 +47,19 @@ class StudySettings:
             raise ValueError("Require 0 <= minimum wrinkle <= maximum wrinkle.")
         if self.duration_days is not None and (not np.isfinite(self.duration_days) or self.duration_days <= 0):
             raise ValueError("Study duration must be positive and finite.")
+        if self.duration_orbits is not None and (not np.isfinite(self.duration_orbits) or self.duration_orbits < 1):
+            raise ValueError("Study orbit count must be finite and at least one.")
+        if self.duration_days is not None and self.duration_orbits is not None:
+            raise ValueError("Specify study duration in days or orbits, not both.")
         if not np.isfinite(self.refine_step_s) or not 0 < self.refine_step_s <= 60:
             raise ValueError("Refinement step must be in (0, 60] seconds.")
         if self.seed < 0:
             raise ValueError("Monte Carlo seed must be nonnegative.")
+
+    def duration_s(self, config):
+        if self.duration_days is not None:
+            return self.duration_days*86400
+        return (1 if self.duration_orbits is None else self.duration_orbits)*config.period_s
 
 
 @dataclass
@@ -65,6 +75,15 @@ class StudyResult:
     refinement_epochs: int
     exact_refinement_candidates: int
 
+    @property
+    def unique_geometry_evaluations(self):
+        return sum(row['reused_from_trial'] is None for row in self.trials)
+
+    def peak_window_times(self, metric='assembly_torque_Nm'):
+        center = self.peaks[metric]['elapsed_seconds']
+        start, end = max(0, center-60), min(self.minutes[-1], center+60)
+        return np.unique(np.r_[start+time_grid(end-start, self.settings.refine_step_s), center])
+
     def peak_config(self, metric='assembly_torque_Nm'):
         peak = self.peaks[metric]
         return replace(self.config, seed=peak['pattern_seed'], wrinkle_m=peak['wrinkle_m'],
@@ -78,6 +97,12 @@ class StudyResult:
             'torque_reference_sail_m': list(self.config.attachment_m),
             'config': asdict(self.config), 'settings': asdict(self.settings),
             'geometry': SailBoundary(self.config).metadata(),
+            'duration_seconds': float(self.minutes[-1]),
+            'duration_orbits': float(self.minutes[-1]/self.config.period_s),
+            'base_step_seconds': 60.0,
+            'eclipse_step_seconds': self.settings.refine_step_s,
+            'eclipse_padding_seconds': 60.0,
+            'unique_geometry_evaluations': self.unique_geometry_evaluations,
             'minute_epochs': len(self.minutes), 'eclipse_events': self.eclipse_events,
             'refinement_epochs': self.refinement_epochs,
             'exact_refinement_candidates': self.exact_refinement_candidates,
@@ -120,9 +145,10 @@ class StudyResult:
         case = self.peak_config()
         evaluator = SpatialLoadEvaluator(case, Sail(case), Hub(case))
         center = self.peaks['assembly_torque_Nm']['elapsed_seconds']
-        times = np.linspace(max(0, center-60), min(self.minutes[-1], center+60), 481)
+        times = self.peak_window_times()
         env = environment(times, case)
         loads = evaluator.loads(env)
+        values = magnitudes(loads)
         with (directory/'peak_torque_window.csv').open('w', newline='') as stream:
             writer = csv.writer(stream)
             writer.writerow(['utc', 'seconds_from_peak', 'center_sunlight',
@@ -131,7 +157,7 @@ class StudyResult:
             for i, seconds in enumerate(times):
                 writer.writerow([(case.start+timedelta(seconds=float(seconds))).isoformat(),
                                  seconds-center, env.sunlight[i], *loads.forces_body[i],
-                                 *loads.torques_body[i], *magnitudes(loads)[i]])
+                                 *loads.torques_body[i], *values[i]])
         checkpoint_path = directory/'progress.json'
         if checkpoint_path.exists():
             checkpoint = json.loads(checkpoint_path.read_text())
@@ -142,13 +168,14 @@ class StudyResult:
 
 def run_study(config, settings=None, progress=None, checkpoint_dir=None):
     settings = settings or StudySettings(max_wrinkle_m=config.wrinkle_m)
-    duration = config.duration_s if settings.duration_days is None else settings.duration_days*86400
+    duration = settings.duration_s(config)
     if duration > config.duration_s:
         raise ValueError("Study duration cannot exceed the configured calendar year.")
     minutes = time_grid(duration)
     env = environment(minutes, config)
     if progress:
-        progress(f'Preparing {len(minutes):,} minute epochs and locating eclipse contacts…')
+        progress(f'Study duration: {duration/config.period_s:.3f} orbits ({duration/60:.2f} minutes). '
+                 f'Preparing {len(minutes):,} minute epochs and locating eclipse contacts…')
     extent = np.hypot(SailBoundary(config).max_radius_m, settings.max_wrinkle_m)
     refinement, events = eclipse_refinement_times(config, duration, settings.refine_step_s, extent)
     refined_env = environment(refinement, config)
@@ -164,7 +191,37 @@ def run_study(config, settings=None, progress=None, checkpoint_dir=None):
     envelope = np.zeros((len(minutes), len(METRICS)))
     global_values = np.full(len(METRICS), -np.inf)
     peaks, trials, evaluated = {}, [], 0
+    geometry_cache = {}
+
+    def record(row):
+        trials.append(row)
+        if checkpoint_dir is not None:
+            directory = Path(checkpoint_dir)
+            directory.mkdir(parents=True, exist_ok=True)
+            checkpoint = {'status': 'running', 'completed_trials': len(trials),
+                          'planned_trials': settings.trials,
+                          'unique_geometry_evaluations': len(geometry_cache),
+                          'duration_seconds': float(duration),
+                          'duration_orbits': float(duration/config.period_s),
+                          'config': asdict(config), 'settings': asdict(settings),
+                          'peaks': peaks, 'trials': trials}
+            temporary = directory/'progress.json.tmp'
+            temporary.write_text(json.dumps(checkpoint, indent=2, allow_nan=False)+'\n')
+            temporary.replace(directory/'progress.json')
+        if progress:
+            reuse = '' if row['reused_from_trial'] is None else f" Reused trial {row['reused_from_trial']+1}."
+            progress(f"Trial {row['trial']+1}/{settings.trials}: height {row['wrinkle_m']:.4f} m; "
+                     f"assembly peak F={row['max_assembly_force_N']*1e6:.3f} µN, "
+                     f"|τ|={row['max_assembly_torque_Nm']*1e6:.3f} µN·m.{reuse}")
+
     for trial, (seed, amplitude) in enumerate(zip(seeds, amplitudes)):
+        # At zero height every random seed yields exactly the same surface.
+        key = ('flat',) if amplitude == 0 else (int(seed), float(amplitude))
+        if key in geometry_cache:
+            previous = geometry_cache[key]
+            record(dict(previous, trial=trial, pattern_seed=int(seed),
+                        reused_from_trial=previous['trial']))
+            continue
         case = replace(config, seed=int(seed), wrinkle_m=float(amplitude), wrinkle_model='stochastic')
         sail, hub = Sail(case), Hub(case)
         evaluator = SpatialLoadEvaluator(case, sail, hub)
@@ -193,7 +250,8 @@ def run_study(config, settings=None, progress=None, checkpoint_dir=None):
             improved = local_best > best_values
             best_values[improved] = local_best[improved]
             best_times[improved] = refinement[group[local_indices[improved]]]
-        row = {'trial': trial, 'pattern_seed': int(seed), 'wrinkle_m': float(amplitude)}
+        row = {'trial': trial, 'pattern_seed': int(seed), 'wrinkle_m': float(amplitude),
+               'reused_from_trial': None}
         n = evaluator.sail_count
         vector_sets = (evaluator.unit_forces, evaluator.unit_moments,
                        evaluator.unit_forces[:n], evaluator.unit_moments[:n])
@@ -217,20 +275,8 @@ def run_study(config, settings=None, progress=None, checkpoint_dir=None):
                     'facet_sunlight_min': float(point.sunlight.min()),
                     'facet_sunlight_max': float(point.sunlight.max()),
                 }
-        trials.append(row)
-        if checkpoint_dir is not None:
-            directory = Path(checkpoint_dir)
-            directory.mkdir(parents=True, exist_ok=True)
-            checkpoint = {'status': 'running', 'completed_trials': len(trials),
-                          'planned_trials': settings.trials, 'config': asdict(config),
-                          'settings': asdict(settings), 'peaks': peaks, 'trials': trials}
-            temporary = directory/'progress.json.tmp'
-            temporary.write_text(json.dumps(checkpoint, indent=2, allow_nan=False)+'\n')
-            temporary.replace(directory/'progress.json')
-        if progress:
-            progress(f'Trial {trial+1}/{settings.trials}: height {amplitude:.4f} m; '
-                     f'assembly peak F={best_values[0]*1e6:.3f} µN, '
-                     f'|τ|={best_values[1]*1e6:.3f} µN·m.')
+        geometry_cache[key] = row
+        record(row)
     return StudyResult(config, settings, minutes, env.sunlight, envelope, trials, peaks,
                        events, len(refinement), evaluated)
 
@@ -243,15 +289,22 @@ def save_figures(result, directory):
     fig, axes = plt.subplots(2, 2, figsize=(13, 8), layout='constrained')
     fig.suptitle(f'{result.config.sail_shape.capitalize()} sail · Monte Carlo largest sampled loads')
     # Block maxima preserve brief peaks when compressing a year into a plot.
+    short_study = result.minutes[-1] < 86400
     days = (result.minutes//86400).astype(int)
     unique = np.unique(days)
     for column, metric in enumerate(METRICS[:2]):
-        daily = np.array([result.minute_envelope[days == day, column].max() for day in unique])
-        axes[0, column].plot(unique, daily*1e6, color='#2874b2')
+        if short_study:
+            x, envelope = result.minutes/60, result.minute_envelope[:, column]
+        else:
+            x = unique
+            envelope = np.array([result.minute_envelope[days == day, column].max() for day in unique])
+        scale = 60 if short_study else 86400
+        axes[0, column].plot(x, envelope*1e6, color='#2874b2')
         peak = result.peaks[metric]
-        axes[0, column].plot(peak['elapsed_seconds']/86400, peak['magnitude']*1e6,
+        axes[0, column].plot(peak['elapsed_seconds']/scale, peak['magnitude']*1e6,
                              '*', color='#e75535', ms=10, label='Refined search maximum')
-        axes[0, column].set(xlabel='Days from Jan 1 UTC', ylabel='µN' if column == 0 else 'µN·m',
+        axes[0, column].set(xlabel='Minutes from start' if short_study else 'Days from Jan 1 UTC',
+                            ylabel='µN' if column == 0 else 'µN·m',
                             title='Assembly force' if column == 0 else 'Assembly torque about attachment')
         axes[0, column].legend(fontsize=8)
         case_peaks = np.array([row['max_'+metric] for row in result.trials])*1e6
@@ -292,8 +345,7 @@ def save_figures(result, directory):
             if ax is axes[0, 0] and spread > 1e-7:
                 from matplotlib.ticker import FormatStrFormatter
                 bar.ax.yaxis.set_major_formatter(FormatStrFormatter('%.6f'))
-        duration = result.minutes[-1]
-        times = np.linspace(max(0, peak['elapsed_seconds']-60), min(duration, peak['elapsed_seconds']+60), 481)
+        times = result.peak_window_times(metric)
         values = magnitudes(evaluator.loads(environment(times, case)))
         for j, ax in enumerate(axes[1]):
             ax.plot(times-peak['elapsed_seconds'], values[:, j]*1e6, label='Assembly')

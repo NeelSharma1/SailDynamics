@@ -13,13 +13,16 @@ def time_grid(duration_s, step_s=60.0):
     return np.append(times, float(duration_s))
 
 
-def eclipse_refinement_times(config, duration_s, step_s=.25, extent_m=None):
+def eclipse_refinement_times(config, duration_s, step_s=10.0, extent_m=None):
     """Locate orbit minima, then bisect outer and inner solar-disc contacts.
 
     Locating each orbit's minimum also detects grazing penumbra events that a
     minute grid could miss completely. Windows are expanded by a bounding sphere
     so the first/last *facet* can enter/leave shadow outside the center contacts.
-    Both ingress and egress are included. A clipped year endpoint is retained.
+    Both ingress and egress are included, with a minute of padding on each side
+    sampled at step_s or finer. Contact endpoints and each transition midpoint
+    are always retained so a fade shorter than step_s is not skipped entirely.
+    A clipped study endpoint is retained.
     """
     if not np.isfinite(step_s) or step_s <= 0:
         raise ValueError("Refinement timestep must be positive and finite.")
@@ -78,5 +81,8 @@ def eclipse_refinement_times(config, duration_s, step_s=.25, extent_m=None):
             (ingress[i], egress[i]),)
         for start, end in spans:
             if end >= start:
-                windows.append(np.linspace(start, end, max(1, int(np.ceil((end-start)/step_s)))+1))
+                left, right = max(0, start-60), min(duration_s, end+60)
+                windows.append(np.r_[
+                    np.linspace(left, right, max(1, int(np.ceil((right-left)/step_s)))+1),
+                    start, (start+end)/2, end])
     return np.unique(np.concatenate(windows)) if windows else np.empty(0), len(centers)

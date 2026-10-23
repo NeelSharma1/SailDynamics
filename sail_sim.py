@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
+import os
 from pathlib import Path
 
 import numpy as np
@@ -37,14 +39,18 @@ def main(argv=None):
                         metavar=('X', 'Y', 'Z'), help="Torque reference in sail axes [m]")
     parser.add_argument("--monte-carlo", type=int, metavar="TRIALS",
                         help="Run bounded stochastic wrinkle study (at least 2 trials)")
-    parser.add_argument("--mc-dir", type=Path, default=Path("output/monte_carlo"))
+    parser.add_argument("--mc-dir", type=Path,
+                        help="Report directory; default is a unique folder under output/monte_carlo")
     parser.add_argument("--mc-seed", type=int, default=2026)
     parser.add_argument("--mc-min-wrinkle", type=float, default=0,
                         help="Minimum sampled peak wrinkle height [m]; maximum is --wrinkle")
-    parser.add_argument("--study-days", type=float,
-                        help="Study days from Jan 1; default is the entire calendar year")
-    parser.add_argument("--refine-step", type=float, default=.25,
-                        help="Maximum eclipse-transition timestep [s], default 0.25")
+    duration = parser.add_mutually_exclusive_group()
+    duration.add_argument("--study-days", type=float,
+                          help="Override study duration in days from Jan 1 UTC")
+    duration.add_argument("--study-orbits", type=float,
+                          help="Study duration in complete orbits (at least 1); default 1 orbit")
+    parser.add_argument("--refine-step", type=float, default=10,
+                        help="Maximum timestep near eclipse [s], default 10; contacts/midpoints included")
     parser.add_argument("--csv", type=Path, help="Export hourly results to this path")
     parser.add_argument("--snapshot", type=Path, help="Save a figure without opening a window")
     parser.add_argument("--hour", type=int, default=0, help="Initial hour index")
@@ -68,7 +74,12 @@ def main(argv=None):
         try:
             settings = StudySettings(trials=args.monte_carlo, seed=args.mc_seed,
                                      min_wrinkle_m=args.mc_min_wrinkle, max_wrinkle_m=args.wrinkle,
-                                     duration_days=args.study_days, refine_step_s=args.refine_step)
+                                     duration_days=args.study_days, duration_orbits=args.study_orbits,
+                                     refine_step_s=args.refine_step)
+            if args.mc_dir is None:
+                stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+                args.mc_dir = Path('output/monte_carlo')/f'{config.sail_shape}_{stamp}_{os.getpid()}'
+            print(f'Study reports: {args.mc_dir.resolve()}', flush=True)
             result = run_study(config, settings, progress=lambda message: print(message, flush=True),
                                checkpoint_dir=args.mc_dir)
         except ValueError as error:

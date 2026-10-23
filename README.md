@@ -55,13 +55,16 @@ For comparison studies, use matching ensemble seeds and wrinkle-height limits. A
 
 ## Monte Carlo peak force and torque study
 
-Run the entire calendar year at one-minute intervals for 32 static random wrinkle patterns, with additional eclipse-transition sampling at intervals no larger than 0.25 seconds:
+By default, each static random wrinkle pattern is simulated for **one complete orbit** (about 92.4 minutes at 400 km). Loads are sampled every minute, with **10-second or finer sampling near eclipse entry and exit**:
 
 ```sh
 .venv/bin/python sail_sim.py --monte-carlo 32 --no-gui
 
-# A shorter first study, with a specified sail/hub size.
-.venv/bin/python sail_sim.py --monte-carlo 8 --study-days 1 --diameter 10 --hub-diameter 1.5 --no-gui --mc-dir output/one_day
+# Explicitly select one orbit, with a specified sail/hub size.
+.venv/bin/python sail_sim.py --monte-carlo 8 --study-orbits 1 --refine-step 10 --diameter 10 --hub-diameter 1.5 --no-gui --mc-dir output/one_orbit
+
+# Optional longer study, or finer eclipse resolution for convergence checks.
+.venv/bin/python sail_sim.py --monte-carlo 8 --study-days 1 --refine-step 1 --no-gui
 
 # Sample peak heights between 0.02 and 0.3 m; reproducible ensemble seed.
 .venv/bin/python sail_sim.py --monte-carlo 64 --mc-min-wrinkle .02 --wrinkle .3 --mc-seed 123 --no-gui
@@ -74,22 +77,26 @@ Without `--no-gui`, the study also opens the normal Matplotlib explorer at the l
 
 The stochastic model combines Gaussian spectral coefficients with random radial/azimuthal modes and phases. It includes asymmetric modes, is periodic around the hub, remains zero at both rims, and is normalized to a bounded peak nodal height. Frequencies are limited by mesh resolution. Each pattern stays fixed during its whole time simulation; the surface is not independently randomized at every minute. The maximum peak height is `--wrinkle`, and `--mc-min-wrinkle` sets the minimum. Heights are drawn uniformly between those limits, with the first two trials deliberately anchored at the minimum and maximum. The flat minimum-height trial (when minimum is zero) is particularly useful for force comparison. `--mc-seed` controls the reproducible ensemble; each pattern's own seed and height are recorded. Use `--wrinkle-model stochastic --seed <pattern_seed> --wrinkle <height>` to reproduce a particular surface outside the study.
 
-Every trial simulates all minute epochs. The reported load at a minute is instantaneous, not the minute-averaged load. The year contains 525,601 minute epochs including both endpoints (527,041 in a leap year). Orbit-minimum searches locate eclipses, including grazing penumbra; root searches then locate ingress and egress contacts. Their windows are expanded to cover the entire sail and sampled at `--refine-step` seconds or finer. Thus a short fade can be found even when it falls completely between minute samples.
+Every trial covers the entire selected duration, including its exact endpoint. The default orbit has 94 minute-grid epochs at 400 km; loads at those times are instantaneous, not minute averages. Use `--study-orbits N` for more orbits or `--study-days D` for an explicit duration in days; these options are mutually exclusive. An annual search remains available with `--study-days 365` (366 for a leap year). A one-orbit result describes the initial Sun/orbit geometry on Jan 1 UTC; it does not establish an annual or seasonal maximum.
+
+Orbit-minimum searches locate eclipses, including grazing penumbra; root searches then locate ingress and egress contacts. Their windows are expanded to cover the entire sail, padded by 60 seconds on either side, and sampled at `--refine-step` seconds or finer (default 10). Contact endpoints and each transition's midpoint are also included: at this altitude a penumbra can last less than 10 seconds, so regular ticks alone could miss it. The rest of the orbit, including deep eclipse, uses the minute grid. Midpoint samples prevent an entirely missed fade but do not guarantee its continuous-time peak. Reduce `--refine-step` to check peak convergence.
+
+Identical geometry is evaluated only once and reused exactly. In particular, `--wrinkle 0 --monte-carlo 32` evaluates a single flat surface and records all 32 trial rows with `reused_from_trial` identifying duplicates. Random seeds cannot change a surface with zero wrinkle height. Nonzero patterns are still evaluated separately.
 
 Earth's apparent occultation is calculated at each facet center in inertial coordinates, including the wrinkle height. This gives each facet a different visible fraction of the finite Sun and permits uneven illumination to produce a moment even on a flat sail. The same calculation is used in the normal explorer and hourly exports. Full-sun and full-umbra epochs use exact uniform shortcuts. Refined epochs are skipped only when conservative illumination and triangle-inequality load bounds show that none of the trial's four running peaks can increase. The tests compare this search with evaluation of the complete unpruned schedule.
 
 The four separate search objectives are the norms of **assembly force, assembly torque, membrane-only force, and membrane-only torque**. The hub contributes only to assembly values. All torques use the same configured `--attachment X Y Z` reference in sail coordinates, default `(0, 0, -0.8)` m. This reference is not automatically the spacecraft center of mass. Vector components, norms, UTC, trial, pattern seed, amplitude, and the range of facet illumination are retained for each winning event.
 
-The default output directory is `output/monte_carlo` (change with `--mc-dir`):
+Each CLI run gets a unique folder under `output/monte_carlo`, printed before calculation, so simultaneous runs do not overwrite each other's results. Use `--mc-dir path` to choose an explicit directory; concurrent runs should use different paths. Already-running processes retain their old settings and must be restarted to use these defaults.
 
 | File | Contents |
 | --- | --- |
-| `summary.json` | Settings, peak values and times, reference point, winning seeds, empirical trial-peak quantiles, and conservative load bounds over the sampled patterns and scheduled epochs. |
+| `summary.json` | Settings, effective duration in seconds/orbits, sampling cadence, unique geometry count, peak values and times, reference point, winning seeds, empirical trial-peak quantiles, and conservative load bounds over the sampled patterns and scheduled epochs. |
 | `progress.json` | Trial-by-trial status and peaks while the study runs; marked complete after data export. |
-| `trials.csv` | Four peak magnitudes, event times, and conservative bounds for each trial. |
+| `trials.csv` | Four peak magnitudes, event times, conservative bounds, and any geometry reuse for each trial (zero-based trial indices). |
 | `minute_envelope.csv` | Minute-by-minute maxima across the sampled patterns for the four objectives, plus center sunlight fraction. This envelope can select different patterns at different minutes. |
-| `peak_torque_window.csv` | Force/torque components and norms at fine resolution over two minutes around the winning assembly-torque event. |
-| `study_summary.png` | Daily maxima of the minute envelopes, refined winning events, and running peak convergence with trial count. |
+| `peak_torque_window.csv` | Force/torque components and norms at the requested refinement cadence over two minutes around the winning assembly-torque event, including the exact winning epoch and clipped to the study duration. |
+| `study_summary.png` | Minute envelopes for studies shorter than a day (daily maxima for longer runs), refined winning events, and running peak convergence with trial count. |
 | `assembly_force_N_peak.png`, `assembly_torque_Nm_peak.png` | Winning geometry, facet illumination, and nearby force/torque histories. |
 | `<objective>_peak.npz` | Both meshes, per-facet beam irradiance/visible fraction, assembly force, and torque at each objective's winning epoch. |
 

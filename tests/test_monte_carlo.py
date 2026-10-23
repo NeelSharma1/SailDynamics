@@ -84,8 +84,65 @@ class SpatialLoadTests(unittest.TestCase):
         distance = np.minimum(np.abs(times[indices]-partial), np.abs(times[indices-1]-partial))
         self.assertLess(float(distance.max()), .251)
 
+    def test_ten_second_refinement_preserves_short_fades_and_padding(self):
+        duration = self.config.period_s
+        times, events = eclipse_refinement_times(self.config, duration)
+        self.assertGreater(events, 0)
+        self.assertGreaterEqual(times.min(), 0)
+        self.assertLessEqual(times.max(), duration)
+        sunlight = environment(times, self.config).sunlight
+        partial = times[(sunlight > .05) & (sunlight < .95)]
+        # Both entry and exit must have an interior sample, even though each
+        # finite-Sun transition is shorter than the requested 10-second step.
+        self.assertGreaterEqual(len(partial), 2)
+        self.assertTrue(np.any(np.diff(partial) > 60))
+        for center in partial:
+            near = times[np.abs(times-center) < 50]
+            self.assertGreater(len(near), 8)
+            self.assertLessEqual(float(np.diff(near).max()), 10)
+
 
 class MonteCarloTests(unittest.TestCase):
+    def test_default_is_complete_orbit_and_explicit_durations(self):
+        config = Config(radial_cells=4, angular_segments=16)
+        result = run_study(config, StudySettings(trials=2))
+        self.assertEqual(result.minutes[0], 0)
+        self.assertEqual(result.minutes[-1], config.period_s)
+        self.assertTrue(np.all(np.diff(result.minutes) <= 60))
+        self.assertEqual(result.settings.refine_step_s, 10)
+        self.assertEqual(StudySettings(duration_orbits=2).duration_s(config), 2*config.period_s)
+        self.assertEqual(StudySettings(duration_days=1).duration_s(config), 86400)
+        times = result.peak_window_times()
+        self.assertIn(result.peaks['assembly_torque_Nm']['elapsed_seconds'], times)
+        self.assertTrue(np.all(np.diff(times) <= 10+1e-10))
+        with tempfile.TemporaryDirectory() as directory:
+            result.export(directory)
+            report = json.loads((Path(directory)/'summary.json').read_text())
+            self.assertEqual(report['duration_orbits'], 1)
+            self.assertEqual(report['base_step_seconds'], 60)
+            self.assertEqual(report['eclipse_step_seconds'], 10)
+
+    def test_flat_ensemble_reuses_identical_geometry(self):
+        config = Config(radial_cells=4, angular_segments=16, wrinkle_m=0)
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_study(config, StudySettings(trials=32, max_wrinkle_m=0),
+                               checkpoint_dir=directory)
+            self.assertEqual(result.unique_geometry_evaluations, 1)
+            self.assertIsNone(result.trials[0]['reused_from_trial'])
+            for row in result.trials[1:]:
+                self.assertEqual(row['reused_from_trial'], 0)
+                for metric in METRICS:
+                    self.assertEqual(row['max_'+metric], result.trials[0]['max_'+metric])
+            # Reuse preserves the minute envelope and all four winning loads.
+            single = run_study(config, StudySettings(trials=2, max_wrinkle_m=0))
+            assert_allclose(result.minute_envelope, single.minute_envelope, atol=0, rtol=0)
+            self.assertEqual(result.peaks, single.peaks)
+            result.export(directory)
+            report = json.loads((Path(directory)/'progress.json').read_text())
+            self.assertEqual(report['unique_geometry_evaluations'], 1)
+            self.assertEqual(report['completed_trials'], 32)
+            self.assertEqual(report['status'], 'complete')
+
     def test_random_pattern_periodicity_bound_and_seed(self):
         r, theta = np.meshgrid(np.linspace(0, 1, 13), np.linspace(0, 2*np.pi, 49), indexing='ij')
         field = StochasticWrinkleField(.2, 7)
@@ -132,7 +189,9 @@ class MonteCarloTests(unittest.TestCase):
 
     def test_invalid_study_parameters(self):
         for kwargs in ({'trials': 1}, {'min_wrinkle_m': -.1}, {'max_wrinkle_m': -.1},
-                       {'refine_step_s': 0}, {'duration_days': -1}, {'seed': -1}):
+                       {'refine_step_s': 0}, {'duration_days': -1}, {'seed': -1},
+                       {'duration_orbits': .5}, {'duration_orbits': float('inf')},
+                       {'duration_days': 1, 'duration_orbits': 1}):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 StudySettings(**kwargs)
 
