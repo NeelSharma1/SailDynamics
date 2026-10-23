@@ -133,15 +133,66 @@ class MonteCarloTests(unittest.TestCase):
                 self.assertEqual(row['reused_from_trial'], 0)
                 for metric in METRICS:
                     self.assertEqual(row['max_'+metric], result.trials[0]['max_'+metric])
-            # Reuse preserves the minute envelope and all four winning loads.
+            # Reuse preserves the minute envelope, averages, and both winning loads.
             single = run_study(config, StudySettings(trials=2, max_wrinkle_m=0))
             assert_allclose(result.minute_envelope, single.minute_envelope, atol=0, rtol=0)
             self.assertEqual(result.peaks, single.peaks)
+            assert_allclose(list(result.averages.values()), list(single.averages.values()), rtol=1e-14)
             result.export(directory)
             report = json.loads((Path(directory)/'progress.json').read_text())
             self.assertEqual(report['unique_geometry_evaluations'], 1)
             self.assertEqual(report['completed_trials'], 32)
             self.assertEqual(report['status'], 'complete')
+
+    def test_ensemble_averages_and_assembly_only_reports(self):
+        config = Config(radial_cells=4, angular_segments=16)
+        settings = StudySettings(trials=3)
+        with tempfile.TemporaryDirectory() as directory:
+            messages = []
+            result = run_study(config, settings, progress=messages.append, checkpoint_dir=directory)
+            refined, _ = eclipse_refinement_times(config, config.period_s, settings.refine_step_s,
+                                                   np.hypot(config.diameter_m/2, settings.max_wrinkle_m))
+            times = np.unique(np.r_[result.minutes, refined])
+            expected_peaks, expected_planforms = [], []
+            for row in result.trials:
+                case = replace(config, seed=row['pattern_seed'], wrinkle_m=row['wrinkle_m'],
+                               wrinkle_model='stochastic')
+                sail, hub = Sail(case), Hub(case)
+                loads = SpatialLoadEvaluator(case, sail, hub).loads(environment(times, case))
+                expected_peaks.append([np.linalg.norm(loads.forces_body, axis=-1).max(),
+                                       np.linalg.norm(loads.torques_body, axis=-1).max()])
+                rim = sail.mesh.vertices[-config.angular_segments:, :2]
+                expected_planforms.append(.5*abs(np.sum(rim[:, 0]*np.roll(rim[:, 1], -1)
+                                                        -rim[:, 1]*np.roll(rim[:, 0], -1))))
+            self.assertEqual(METRICS, ('assembly_force_N', 'assembly_torque_Nm'))
+            self.assertEqual(result.minute_envelope.shape[1], 2)
+            self.assertAlmostEqual(result.averages['total_projected_area_m2'], np.mean(expected_planforms))
+            flat = Sail(replace(config, wrinkle_m=0))
+            self.assertAlmostEqual(result.averages['total_material_area_m2'],
+                                   flat.material_area+Hub(config).projected_area)
+            assert_allclose([result.averages['trial_peak_'+metric] for metric in METRICS],
+                            np.mean(expected_peaks, axis=0), atol=1e-12, rtol=0)
+            self.assertTrue(any('Ensemble average areas' in message for message in messages))
+            self.assertTrue(any('not time averages' in message for message in messages))
+            result.export(directory)
+            report = json.loads((Path(directory)/'summary.json').read_text())
+            self.assertEqual(report['averages'], result.averages)
+            self.assertEqual(set(report['peaks']), set(METRICS))
+            for peak in report['peaks'].values():
+                self.assertNotIn('sail_force_body_N', peak)
+                self.assertNotIn('sail_torque_body_Nm', peak)
+            checkpoint = json.loads((Path(directory)/'progress.json').read_text())
+            self.assertEqual(checkpoint['averages'], result.averages)
+            for filename in ('trials.csv', 'minute_envelope.csv', 'peak_torque_window.csv', 'averages.csv'):
+                with (Path(directory)/filename).open() as stream:
+                    reader = csv.DictReader(stream)
+                    self.assertFalse(any('sail_force' in field or 'sail_torque' in field
+                                         for field in reader.fieldnames))
+                    if filename == 'averages.csv':
+                        values = next(reader)
+                        for field, value in result.averages.items():
+                            self.assertEqual(float(values[field]), value)
+            self.assertEqual(len(list(Path(directory).glob('*_peak.npz'))), 2)
 
     def test_random_pattern_periodicity_bound_and_seed(self):
         r, theta = np.meshgrid(np.linspace(0, 1, 13), np.linspace(0, 2*np.pi, 49), indexing='ij')

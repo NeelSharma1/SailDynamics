@@ -141,8 +141,6 @@ class SpatialLoadEvaluator:
         """Triangle-inequality bounds in the same order as the study's metrics."""
         low, high = self.illumination_bounds(env)
         delta = np.maximum(env.sunlight-low, high-env.sunlight)
-        n = self.sail_count
-        vectors = (self.unit_forces, self.unit_moments,
-                   self.unit_forces[:n], self.unit_moments[:n])
+        vectors = (self.unit_forces, self.unit_moments)
         return np.stack([env.unshadowed_flux*(env.sunlight*np.linalg.norm(v.sum(axis=0))
                          + delta*np.linalg.norm(v, axis=-1).sum()) for v in vectors], axis=-1)

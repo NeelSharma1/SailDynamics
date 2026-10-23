@@ -3,7 +3,7 @@
 Every pattern is static over the requested duration. Minute results are evaluated
 for all patterns. All eclipse transitions receive finer sampling. Conservative
 triangle-inequality bounds skip refined epochs only when they cannot increase any
-of that trial's four recorded peak magnitudes. No statistical global maximum or
+of that trial's two recorded peak magnitudes. No statistical global maximum or
 confidence level is inferred from the largest random sample.
 """
 from dataclasses import asdict, dataclass, replace
@@ -19,13 +19,23 @@ from .illumination import SpatialLoadEvaluator
 from .sail import Sail, Hub, SailBoundary
 from .sampling import time_grid, eclipse_refinement_times
 
-METRICS = ('assembly_force_N', 'assembly_torque_Nm', 'sail_force_N', 'sail_torque_Nm')
+METRICS = ('assembly_force_N', 'assembly_torque_Nm')
+AVERAGES_INTERPRETATION = ('Equal-weight arithmetic means across all trial rows, including reused '
+                           'geometries and amplitude anchors. Force and torque are means of trial '
+                           'peak magnitudes, not time-averaged loads.')
 
 
 def magnitudes(loads):
     return np.stack([np.linalg.norm(v, axis=-1) for v in
-                     (loads.forces_body, loads.torques_body,
-                      loads.sail_forces_body, loads.sail_torques_body)], axis=-1)
+                     (loads.forces_body, loads.torques_body)], axis=-1)
+
+
+def trial_averages(trials):
+    values = {field: float(np.mean([row[field] for row in trials])) for field in
+              ('total_material_area_m2', 'total_projected_area_m2')}
+    values.update({'trial_peak_'+metric: float(np.mean([row['max_'+metric] for row in trials]))
+                   for metric in METRICS})
+    return values
 
 
 @dataclass(frozen=True)
@@ -79,6 +89,10 @@ class StudyResult:
     def unique_geometry_evaluations(self):
         return sum(row['reused_from_trial'] is None for row in self.trials)
 
+    @property
+    def averages(self):
+        return trial_averages(self.trials)
+
     def peak_window_times(self, metric='assembly_torque_Nm'):
         center = self.peaks[metric]['elapsed_seconds']
         start, end = max(0, center-60), min(self.minutes[-1], center+60)
@@ -111,6 +125,8 @@ class StudyResult:
             'wrinkle_distribution': 'Static Gaussian spectral patterns; uniform peak amplitude, '
                                     'with minimum/maximum amplitude anchor trials.',
             'peaks': self.peaks,
+            'averages': self.averages,
+            'averages_interpretation': AVERAGES_INTERPRETATION,
             'bounds_over_sampled_patterns_and_epochs': {
                 metric: max(row['upper_bound_'+metric] for row in self.trials) for metric in METRICS},
             'empirical_trial_peak_quantiles': {
@@ -118,6 +134,10 @@ class StudyResult:
                          for metric in METRICS} for q in (.5, .95, .99)},
         }
         (directory/'summary.json').write_text(json.dumps(summary, indent=2, allow_nan=False)+'\n')
+        with (directory/'averages.csv').open('w', newline='') as stream:
+            writer = csv.DictWriter(stream, fieldnames=list(self.averages))
+            writer.writeheader()
+            writer.writerow(self.averages)
         with (directory/'trials.csv').open('w', newline='') as stream:
             writer = csv.DictWriter(stream, fieldnames=list(self.trials[0]))
             writer.writeheader()
@@ -208,7 +228,9 @@ def run_study(config, settings=None, progress=None, checkpoint_dir=None):
                           'duration_seconds': float(duration),
                           'duration_orbits': float(duration/config.period_s),
                           'config': asdict(config), 'settings': asdict(settings),
-                          'peaks': peaks, 'trials': trials}
+                          'peaks': peaks, 'trials': trials,
+                          'averages': trial_averages(trials),
+                          'averages_interpretation': AVERAGES_INTERPRETATION}
             temporary = directory/'progress.json.tmp'
             temporary.write_text(json.dumps(checkpoint, indent=2, allow_nan=False)+'\n')
             temporary.replace(directory/'progress.json')
@@ -258,10 +280,9 @@ def run_study(config, settings=None, progress=None, checkpoint_dir=None):
         row = {'trial': trial, 'pattern_seed': int(seed), 'wrinkle_m': float(amplitude),
                'reused_from_trial': None, 'outer_scale': sail.boundary.scale,
                'membrane_material_area_m2': sail.material_area,
+               'total_material_area_m2': float(sail.material_area+hub.projected_area),
                'total_projected_area_m2': float(sail.projected_area+hub.projected_area)}
-        n = evaluator.sail_count
-        vector_sets = (evaluator.unit_forces, evaluator.unit_moments,
-                       evaluator.unit_forces[:n], evaluator.unit_moments[:n])
+        vector_sets = (evaluator.unit_forces, evaluator.unit_moments)
         for j, metric in enumerate(METRICS):
             row['max_'+metric], row[metric+'_time_s'] = float(best_values[j]), float(best_times[j])
             row['upper_bound_'+metric] = float(max_incident*np.linalg.norm(vector_sets[j], axis=-1).sum())
@@ -276,8 +297,6 @@ def run_study(config, settings=None, progress=None, checkpoint_dir=None):
                     'utc': (config.start+timedelta(seconds=float(best_times[j]))).isoformat(),
                     'assembly_force_body_N': point.loads.forces_body.tolist(),
                     'assembly_torque_body_Nm': point.loads.torques_body.tolist(),
-                    'sail_force_body_N': point.loads.sail_forces_body.tolist(),
-                    'sail_torque_body_Nm': point.loads.sail_torques_body.tolist(),
                     'center_sunlight_fraction': float(point.environment.sunlight),
                     'facet_sunlight_min': float(point.sunlight.min()),
                     'facet_sunlight_max': float(point.sunlight.max()),
@@ -285,6 +304,14 @@ def run_study(config, settings=None, progress=None, checkpoint_dir=None):
                 }
         geometry_cache[key] = row
         record(row)
+    if progress:
+        averages = trial_averages(trials)
+        progress(f'Ensemble average areas ({len(trials)} trials, membrane + hub): '
+                 f"material={averages['total_material_area_m2']:.6f} m²; "
+                 f"planform={averages['total_projected_area_m2']:.6f} m².")
+        progress('Ensemble average trial peaks (not time averages): '
+                 f"assembly |F|={averages['trial_peak_assembly_force_N']*1e6:.6f} µN; "
+                 f"|τ|={averages['trial_peak_assembly_torque_Nm']*1e6:.6f} µN·m.")
     return StudyResult(config, settings, minutes, env.sunlight, envelope, trials, peaks,
                        events, len(refinement), evaluated)
 
@@ -319,6 +346,8 @@ def save_figures(result, directory):
         axes[1, column].plot(np.arange(len(case_peaks))+1, case_peaks, '.', label='Trial peak')
         axes[1, column].plot(np.arange(len(case_peaks))+1, np.maximum.accumulate(case_peaks),
                              label='Running largest sample')
+        axes[1, column].axhline(result.averages['trial_peak_'+metric]*1e6,
+                                color='#687989', ls=':', label='Mean trial peak')
         axes[1, column].set(xlabel='Trial (first two anchor amplitude limits)',
                             ylabel='µN' if column == 0 else 'µN·m')
         axes[1, column].legend(fontsize=8)
@@ -357,7 +386,6 @@ def save_figures(result, directory):
         values = magnitudes(evaluator.loads(environment(times, case)))
         for j, ax in enumerate(axes[1]):
             ax.plot(times-peak['elapsed_seconds'], values[:, j]*1e6, label='Assembly')
-            ax.plot(times-peak['elapsed_seconds'], values[:, j+2]*1e6, '--', label='Membrane')
             ax.axvline(0, color='#e75535', lw=1)
             ax.set(xlabel='Seconds from peak', ylabel='µN' if j == 0 else 'µN·m')
             ax.grid(alpha=.2)
