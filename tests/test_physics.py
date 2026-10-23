@@ -54,15 +54,15 @@ class OpticalTests(unittest.TestCase):
         self.assertAlmostEqual(np.max(np.abs(mesh.vertices[:, 2])), config.wrinkle_m)
         area = config.angular_segments/8*np.sin(2*np.pi/config.angular_segments)*(
             config.diameter_m**2-config.hub_diameter_m**2)
-        self.assertAlmostEqual(sail.projected_area, area)
-        self.assertGreater(mesh.areas.sum(), area)
+        self.assertAlmostEqual(mesh.areas.sum(), area)
+        self.assertLess(sail.projected_area, area)
         forces, irradiance = sail.facet_loads(SOLAR_CONSTANT)
-        self.assertAlmostEqual(np.sum(irradiance*mesh.areas), SOLAR_CONSTANT*area)
+        self.assertAlmostEqual(np.sum(irradiance*mesh.areas), SOLAR_CONSTANT*sail.projected_area)
         self.assertLess(np.linalg.norm(forces.sum(axis=0)),
                         np.linalg.norm(Sail(replace(config, wrinkle_m=0)).unit_force)*SOLAR_CONSTANT)
-        # An absorbing height-field sail keeps the same axial momentum transfer.
+        # Absorption transfers axial momentum for the reduced projected area.
         absorber = Sail(replace(config, specular=0, diffuse=0))
-        assert_allclose(absorber.unit_force, [0, 0, -area/LIGHT_SPEED], atol=1e-18)
+        assert_allclose(absorber.unit_force, [0, 0, -absorber.projected_area/LIGHT_SPEED], atol=1e-18)
 
     def test_mount_torque_translation(self):
         centered = Sail(Config(radial_cells=8, wrinkle_m=0, attachment_m=(0, 0, 0)))

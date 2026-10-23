@@ -38,6 +38,10 @@ class Simulation:
     def projected_area(self):
         return self.sail.projected_area + self.hub.projected_area
 
+    @property
+    def material_area(self):
+        return self.sail.material_area + self.hub.projected_area
+
     def change_wrinkles(self, amplitude: float):
         self._change_geometry(wrinkle_m=float(amplitude))
 
@@ -70,7 +74,8 @@ class Simulation:
                              "satellite_eci_z_m", "sail_force_norm_N", "hub_force_norm_N",
                              "reference_circle_diameter_m", "hub_diameter_m", "membrane_projected_area_m2",
                              "hub_projected_area_m2", "sail_shape", "outer_corner_to_corner_m",
-                             "outer_side_to_side_m"])
+                             "outer_side_to_side_m", "membrane_material_area_m2",
+                             "total_material_area_m2", "outer_scale"])
             for i, seconds in enumerate(self.hours):
                 force_norm = np.linalg.norm(loads.forces_body[i])
                 writer.writerow([(self.config.start + timedelta(seconds=float(seconds))).isoformat(),
@@ -84,5 +89,6 @@ class Simulation:
                                  self.config.diameter_m, self.config.hub_diameter_m,
                                  self.sail.projected_area, self.hub.projected_area,
                                  self.config.sail_shape, 2*self.sail.boundary.max_radius_m,
-                                 2*self.sail.boundary.min_radius_m])
+                                 2*self.sail.boundary.min_radius_m, self.sail.material_area,
+                                 self.material_area, self.sail.boundary.scale])
         return path

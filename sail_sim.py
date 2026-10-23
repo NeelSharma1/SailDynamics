@@ -20,9 +20,9 @@ def main(argv=None):
     parser.add_argument("--raan", type=float, default=0, help="Ascending-node longitude [deg]")
     parser.add_argument("--phase", type=float, default=0, help="Initial orbital phase [deg]")
     parser.add_argument("--diameter", "--width", dest="diameter", type=float, default=10,
-                        help="Reference circle diameter [m]; octagon preserves its projected mesh area")
+                        help="Flat material reference circle diameter [m]; wrinkles contract the outline")
     parser.add_argument("--shape", choices=("circular", "octagonal"), default="circular",
-                        help="Outer sail outline; the hub and total projected area are preserved")
+                        help="Outer sail outline; the hub and total material area are preserved")
     parser.add_argument("--hub-diameter", type=float, default=1, help="Rigid central hub diameter [m]")
     parser.add_argument("--radial-cells", "--cells", dest="radial_cells", type=int, default=12,
                         help="Radial mesh cells from hub rim to sail rim")
@@ -97,14 +97,21 @@ def main(argv=None):
             return result
         config = result.peak_config('assembly_torque_Nm')
         replay_seconds = result.peaks['assembly_torque_Nm']['elapsed_seconds']
-    simulation = Simulation(config)
+    try:
+        simulation = Simulation(config)
+    except ValueError as error:
+        parser.error(str(error))
     if not 0 <= args.hour < len(simulation.hours):
         parser.error(f"--hour must be between 0 and {len(simulation.hours)-1}")
     print(f"{len(simulation.hours):,} hourly samples; {len(simulation.sail.mesh.triangles):,} facets; "
           f"orbital period {config.period_s/60:.2f} minutes.")
     print(f"{config.sail_shape.capitalize()} sail; reference circle diameter {config.diameter_m:g} m; "
           f"hub diameter {config.hub_diameter_m:g} m; "
-          f"membrane area {simulation.sail.projected_area:.3f} m²; hub area {simulation.hub.projected_area:.3f} m².")
+          f"membrane material area {simulation.sail.material_area:.3f} m²; "
+          f"membrane projected area {simulation.sail.projected_area:.3f} m²; "
+          f"hub area {simulation.hub.projected_area:.3f} m².")
+    print(f"Total material area {simulation.material_area:.6g} m²; "
+          f"projected area {simulation.projected_area:.6g} m²; outer scale {simulation.sail.boundary.scale:.6f}.")
     if config.sail_shape == 'octagonal':
         boundary = simulation.sail.boundary
         print(f"Octagon corner-to-corner {2*boundary.max_radius_m:.6g} m; "

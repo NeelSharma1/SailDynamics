@@ -97,6 +97,7 @@ class StudyResult:
             'torque_reference_sail_m': list(self.config.attachment_m),
             'config': asdict(self.config), 'settings': asdict(self.settings),
             'geometry': SailBoundary(self.config).metadata(),
+            'geometry_scope': 'Flat material reference. Actual contracted geometry is recorded for each peak.',
             'duration_seconds': float(self.minutes[-1]),
             'duration_orbits': float(self.minutes[-1]/self.config.period_s),
             'base_step_seconds': 60.0,
@@ -136,6 +137,9 @@ class StudyResult:
             np.savez_compressed(directory/f'{metric}_peak.npz',
                                 sail_shape=config.sail_shape,
                                 total_projected_area_m2=sail.projected_area+hub.projected_area,
+                                membrane_material_area_m2=sail.material_area,
+                                total_material_area_m2=sail.material_area+hub.projected_area,
+                                outer_scale=sail.boundary.scale,
                                 sail_vertices=sail.mesh.vertices, sail_triangles=sail.mesh.triangles,
                                 hub_vertices=hub.mesh.vertices, hub_triangles=hub.mesh.triangles,
                                 beam_flux_W_m2=point.beam_flux, sunlight_fraction=point.sunlight,
@@ -211,6 +215,7 @@ def run_study(config, settings=None, progress=None, checkpoint_dir=None):
         if progress:
             reuse = '' if row['reused_from_trial'] is None else f" Reused trial {row['reused_from_trial']+1}."
             progress(f"Trial {row['trial']+1}/{settings.trials}: height {row['wrinkle_m']:.4f} m; "
+                     f"planform area (membrane + hub)={row['total_projected_area_m2']:.6f} m²; "
                      f"assembly peak F={row['max_assembly_force_N']*1e6:.3f} µN, "
                      f"|τ|={row['max_assembly_torque_Nm']*1e6:.3f} µN·m.{reuse}")
 
@@ -251,7 +256,9 @@ def run_study(config, settings=None, progress=None, checkpoint_dir=None):
             best_values[improved] = local_best[improved]
             best_times[improved] = refinement[group[local_indices[improved]]]
         row = {'trial': trial, 'pattern_seed': int(seed), 'wrinkle_m': float(amplitude),
-               'reused_from_trial': None}
+               'reused_from_trial': None, 'outer_scale': sail.boundary.scale,
+               'membrane_material_area_m2': sail.material_area,
+               'total_projected_area_m2': float(sail.projected_area+hub.projected_area)}
         n = evaluator.sail_count
         vector_sets = (evaluator.unit_forces, evaluator.unit_moments,
                        evaluator.unit_forces[:n], evaluator.unit_moments[:n])
@@ -274,6 +281,7 @@ def run_study(config, settings=None, progress=None, checkpoint_dir=None):
                     'center_sunlight_fraction': float(point.environment.sunlight),
                     'facet_sunlight_min': float(point.sunlight.min()),
                     'facet_sunlight_max': float(point.sunlight.max()),
+                    'geometry': sail.metadata(),
                 }
         geometry_cache[key] = row
         record(row)

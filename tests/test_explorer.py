@@ -23,8 +23,14 @@ class ExplorerTests(unittest.TestCase):
             self.assertEqual(view.index, 124)
             self.assertEqual(view.offset_s, 0)
             original = np.linalg.norm(view.sim.sail.unit_force)
+            material_area = view.sim.material_area
+            wrinkled_area = view.sim.projected_area
             view.wrinkle_slider.set_val(0)
             self.assertGreater(np.linalg.norm(view.sim.sail.unit_force), original)
+            self.assertAlmostEqual(view.sim.material_area, material_area)
+            self.assertGreater(view.sim.projected_area, wrinkled_area)
+            self.assertIn('material', view.geometry_label.get_text())
+            self.assertIn('projected', view.geometry_label.get_text())
             outer_area = view.sim.projected_area
             flat_force = np.linalg.norm(view.sim.unit_force)
             view.hub_slider.set_val(3)
@@ -52,6 +58,13 @@ class ExplorerTests(unittest.TestCase):
             self.assertIn('Octagonal', view.geometry_label.get_text())
             view._shape_changed()
             self.assertEqual(view.sim.config.sail_shape, 'circular')
+            # An infeasible wrinkle slider change rolls back instead of adding
+            # material or leaving the controls inconsistent with the mesh.
+            view.hub_slider.set_val(9.5)
+            view.wrinkle_slider.set_val(.6)
+            self.assertEqual(view.sim.config.wrinkle_m, 0)
+            self.assertEqual(view.wrinkle_slider.val, 0)
+            self.assertIn('Cannot conserve membrane area', view.footer.get_text())
             view._toggle_play()
             self.assertTrue(view.playing)
             view._tick()

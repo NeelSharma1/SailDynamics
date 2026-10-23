@@ -10,6 +10,7 @@ from .constants import EARTH_RADIUS, LIGHT_SPEED, SOLAR_CONSTANT, AU
 from .simulation import Simulation
 from .environment import environment
 from .frames.orbital import SatelliteOrbitalFrame
+from .sail.boundary import SailBoundary
 
 
 class Explorer:
@@ -222,7 +223,8 @@ class Explorer:
         _, hub_irradiance = self.sim.hub.facet_loads(point.beam_flux[point.sail_count:])
         self.hub_map_collection.set_array(hub_irradiance)
         self.geometry_label.set_text(
-            f"{config.sail_shape.capitalize()} · total {self.sim.projected_area:.2f} m² · "
+            f"{config.sail_shape.capitalize()} · material {self.sim.material_area:.2f} m² · "
+            f"projected {self.sim.projected_area:.2f} m² · "
             f"hub Ø {config.hub_diameter_m:g} m\n"
             f"Membrane |F| {np.linalg.norm(loads.sail_forces_body)*1e6:.2f} µN · "
             f"hub |F| {np.linalg.norm(loads.hub_forces_body)*1e6:.2f} µN")
@@ -264,7 +266,7 @@ class Explorer:
         stamp = config.start + timedelta(seconds=seconds)
         torque = np.linalg.norm(loads.torques_body)
         flat = float(env.flux)/LIGHT_SPEED*(
-            self.sim.sail.projected_area*(1+config.specular+2*config.diffuse/3)
+            self.sim.sail.material_area*(1+config.specular+2*config.diffuse/3)
             + self.sim.hub.projected_area*(1+config.hub_specular+2*config.hub_diffuse/3))
         ratio_text = f"{magnitude/flat:.2%}" if flat > 0 else "— (eclipse)"
         self.stats.set_text(
@@ -302,20 +304,35 @@ class Explorer:
         self.update()
 
     def _wrinkle_changed(self, value):
-        self.sim.change_wrinkles(value)
+        try:
+            self.sim.change_wrinkles(value)
+        except ValueError as error:
+            self._restore_slider(self.wrinkle_slider, self.sim.config.wrinkle_m, error)
+            return
         self._draw_annual()
         self._draw_detail()
         self.update()
 
     def _hub_changed(self, value):
-        self.sim.change_hub_diameter(value)
+        try:
+            self.sim.change_hub_diameter(value)
+        except ValueError as error:
+            self._restore_slider(self.hub_slider, self.sim.config.hub_diameter_m, error)
+            return
         self._draw_annual()
         self._draw_detail()
         self.update()
 
+    def _restore_slider(self, slider, value, error):
+        slider.eventson = False
+        slider.set_val(value)
+        slider.eventson = True
+        self.footer.set_text(str(error))
+        self.fig.canvas.draw_idle()
+
     def _set_hub_slider_limit(self):
         self.hub_slider.valmax = max(self.sim.config.hub_diameter_m,
-                                     1.9*self.sim.sail.boundary.min_radius_m)
+                                     1.9*SailBoundary(self.sim.config).min_radius_m)
         self.hub_slider.ax.set_xlim(self.hub_slider.valmin, self.hub_slider.valmax)
 
     def _shape_changed(self, _=None):
@@ -328,7 +345,7 @@ class Explorer:
             return
         self.shape_button.label.set_text('Shape: octagon' if shape == 'octagonal' else 'Shape: circle')
         self._set_hub_slider_limit()
-        self.footer.set_text(f'{shape.capitalize()} sail · preserved total area {self.sim.projected_area:.6f} m² '
+        self.footer.set_text(f'{shape.capitalize()} sail · preserved material area {self.sim.material_area:.6f} m² '
                              f'and hub diameter {self.sim.config.hub_diameter_m:g} m')
         self._draw_annual()
         self._draw_detail()

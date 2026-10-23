@@ -1,4 +1,4 @@
-"""Equal projected areas, an unchanged hub, and an eight-sided outer boundary."""
+"""Equal material areas, an unchanged hub, and an eight-sided outer boundary."""
 import csv
 from dataclasses import replace
 import json
@@ -19,14 +19,16 @@ from sail_dynamics.sampling import eclipse_refinement_times
 
 
 class ShapeTests(unittest.TestCase):
-    def test_equal_projected_area_and_identical_hub(self):
+    def test_equal_material_area_and_identical_hub(self):
         for segments in (8, 16, 48, 96, 192):
             for height in (0, .18, .6):
                 config = Config(angular_segments=segments, wrinkle_m=height)
                 circle = Sail(config)
                 oct_config = replace(config, sail_shape='octagonal')
                 octagon = Sail(oct_config)
-                self.assertAlmostEqual(circle.projected_area, octagon.projected_area, places=11)
+                self.assertAlmostEqual(circle.material_area, octagon.material_area, places=10)
+                if height == 0:
+                    self.assertAlmostEqual(circle.projected_area, octagon.projected_area, places=11)
                 self.assertEqual(circle.mesh.vertices.shape, octagon.mesh.vertices.shape)
                 # Inner ring and hub never change while choosing the outer shape.
                 assert_allclose(octagon.mesh.vertices[:segments], circle.mesh.vertices[:segments], atol=1e-15)
@@ -50,9 +52,9 @@ class ShapeTests(unittest.TestCase):
         # Independent shoelace integral verifies area, including the hub opening.
         area = .5*np.abs(np.sum(points[:, 0]*np.roll(points[:, 1], -1)
                                -points[:, 1]*np.roll(points[:, 0], -1)))
-        self.assertAlmostEqual(area, Sail(Config()).projected_area+Hub(Config()).projected_area, places=11)
-        self.assertGreater(boundary.max_radius_m, config.diameter_m/2)
-        self.assertLess(boundary.min_radius_m, config.diameter_m/2)
+        self.assertAlmostEqual(area, sail.projected_area+Hub(config).projected_area, places=11)
+        self.assertAlmostEqual(area, boundary.projected_area_m2, places=11)
+        self.assertLess(boundary.max_radius_m, SailBoundary(config).max_radius_m)
 
     def test_flat_full_sun_loads_match_at_equal_area(self):
         config = Config(wrinkle_m=0)
@@ -71,7 +73,7 @@ class ShapeTests(unittest.TestCase):
                        {'sail_shape': 'octagonal', 'hub_diameter_m': 9.9}):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 Config(**kwargs)
-        sim = Simulation(Config(hub_diameter_m=9.9, radial_cells=4))
+        sim = Simulation(Config(hub_diameter_m=9.9, radial_cells=4, wrinkle_m=0))
         with self.assertRaises(ValueError):
             sim.change_shape('octagonal')
         self.assertEqual(sim.config.sail_shape, 'circular')
@@ -94,8 +96,12 @@ class ShapeTests(unittest.TestCase):
             self.assertEqual(summary['config']['sail_shape'], 'octagonal')
             self.assertEqual(summary['geometry']['shape'], 'octagonal')
             self.assertGreater(summary['geometry']['outer_corner_to_corner_m'], config.diameter_m)
+            geometry = summary['peaks']['assembly_torque_Nm']['geometry']
+            self.assertLessEqual(geometry['outer_scale'], 1+1e-12)
+            self.assertIn('membrane_material_area_m2', geometry)
             npz = np.load(Path(directory)/'assembly_torque_Nm_peak.npz')
             self.assertEqual(str(npz['sail_shape']), 'octagonal')
+            self.assertAlmostEqual(float(npz['total_material_area_m2']), SailBoundary(config).reference_area_m2)
             path = Simulation(config).export_csv(Path(directory)/'hourly.csv')
             with path.open() as stream:
                 row = next(csv.DictReader(stream))
