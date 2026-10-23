@@ -125,8 +125,13 @@ class MonteCarloTests(unittest.TestCase):
     def test_flat_ensemble_reuses_identical_geometry(self):
         config = Config(radial_cells=4, angular_segments=16, wrinkle_m=0)
         with tempfile.TemporaryDirectory() as directory:
+            updates, messages = [], []
             result = run_study(config, StudySettings(trials=32, max_wrinkle_m=0),
-                               checkpoint_dir=directory)
+                               checkpoint_dir=directory, progress=messages.append,
+                               trial_progress=lambda completed, total: updates.append((completed, total)))
+            self.assertEqual(updates, [(completed, 32) for completed in range(33)])
+            self.assertFalse(any(message.startswith('Trial ') for message in messages))
+            self.assertTrue(any('Monte Carlo summary' in message for message in messages))
             self.assertEqual(result.unique_geometry_evaluations, 1)
             self.assertIsNone(result.trials[0]['reused_from_trial'])
             for row in result.trials[1:]:
@@ -172,11 +177,26 @@ class MonteCarloTests(unittest.TestCase):
                                    flat.material_area+Hub(config).projected_area)
             assert_allclose([result.averages['trial_peak_'+metric] for metric in METRICS],
                             np.mean(expected_peaks, axis=0), atol=1e-12, rtol=0)
-            self.assertTrue(any('Ensemble average areas' in message for message in messages))
+            expected_rows = {'total_projected_area_m2': expected_planforms,
+                             'trial_peak_assembly_force_N': np.array(expected_peaks)[:, 0],
+                             'trial_peak_assembly_torque_Nm': np.array(expected_peaks)[:, 1]}
+            for key, values in expected_rows.items():
+                assert_allclose(list(result.statistics[key].values()),
+                                [np.min(values), np.mean(values), np.max(values)], atol=1e-12, rtol=0)
+            self.assertTrue(any('Lowest' in message and 'Average' in message and 'Highest' in message
+                                for message in messages))
             self.assertTrue(any('not time averages' in message for message in messages))
             result.export(directory)
             report = json.loads((Path(directory)/'summary.json').read_text())
             self.assertEqual(report['averages'], result.averages)
+            self.assertEqual(report['statistics'], result.statistics)
+            self.assertEqual((Path(directory)/'summary_table.txt').read_text(), result.summary_table()+'\n')
+            with (Path(directory)/'statistics.csv').open() as stream:
+                rows = list(csv.DictReader(stream))
+                self.assertEqual(len(rows), 4)
+                for row in rows:
+                    for stat in ('lowest', 'average', 'highest'):
+                        self.assertEqual(float(row[stat]), result.statistics[row['quantity_SI']][stat])
             self.assertEqual(set(report['peaks']), set(METRICS))
             for peak in report['peaks'].values():
                 self.assertNotIn('sail_force_body_N', peak)

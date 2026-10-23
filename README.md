@@ -60,6 +60,9 @@ By default, each static random wrinkle pattern is simulated for **one complete o
 ```sh
 .venv/bin/python sail_sim.py --monte-carlo 32 --no-gui
 
+# Replace per-trial results with a progress bar; keep the final summary table.
+.venv/bin/python sail_sim.py --monte-carlo 32 --pb --no-gui
+
 # Explicitly select one orbit, with a specified sail/hub size.
 .venv/bin/python sail_sim.py --monte-carlo 8 --study-orbits 1 --refine-step 10 --diameter 10 --hub-diameter 1.5 --no-gui --mc-dir output/one_orbit
 
@@ -85,7 +88,9 @@ Identical geometry is evaluated only once and reused exactly. In particular, `--
 
 Each trial's console progress line prints its deployed **planform area (membrane + hub)** in m², alongside wrinkle height and peak loads. This is the projected area after wrinkle contraction, rather than the fixed material area.
 
-At completion, the console prints **ensemble mean material area, planform area, peak assembly force magnitude, and peak assembly torque magnitude**. These are equal-weight arithmetic averages across all trial rows, including reused geometries and the amplitude anchors. Force/torque averages mean the average of each trial's peak magnitude over the selected orbit/duration; they are not time averages or magnitudes of averaged vectors. Results are also saved under `averages` in `summary.json` and as one row in `averages.csv`, using SI units. `progress.json` includes the running averages over completed trials.
+Add `--pb` to replace those individual trial results with an updating bar showing completed trials, total trials, and percentage. Reused flat trials count as completed trials too. The study setup messages, final summary table, and saved reports are still produced. Winning-event details are retained in the saved reports.
+
+At completion, the console displays **material area once as a constant**, followed by a table with **Lowest, Average, and Highest** columns for planform area, trial-peak assembly force magnitude, and trial-peak assembly torque magnitude. Each column summarizes values across trial rows, including reused geometries and amplitude anchors. In particular, the lowest load entry is the smallest **trial peak**, not the lowest instantaneous load during an orbit. The average is the arithmetic mean of trial peaks, rather than a time average or magnitude of an averaged vector. The table uses m², µN, and µN·m and is saved as `summary_table.txt`. `statistics.csv` and the `statistics` object in `summary.json` retain all statistics, including material area, in SI units. The mean values remain available in `averages.csv` and `summary.json`'s `averages` object. `progress.json` includes running statistics over completed trials.
 
 Earth's apparent occultation is calculated at each facet center in inertial coordinates, including the wrinkle height. This gives each facet a different visible fraction of the finite Sun and permits uneven illumination to produce a moment even on a flat sail. The same calculation is used in the normal explorer and hourly exports. Full-sun and full-umbra epochs use exact uniform shortcuts. Refined epochs are skipped only when conservative illumination and triangle-inequality load bounds show that neither of the trial's two running peaks can increase. The tests compare this search with evaluation of the complete unpruned schedule.
 
@@ -97,6 +102,7 @@ Each CLI run gets a unique folder under `output/monte_carlo`, printed before cal
 | --- | --- |
 | `summary.json` | Settings, effective duration in seconds/orbits, sampling cadence, unique geometry count, ensemble averages, peak values and times, reference point, winning seeds, empirical trial-peak quantiles, and conservative load bounds over the sampled patterns and scheduled epochs. |
 | `averages.csv` | One row: mean total material area, total planform area, trial-peak assembly force magnitude, and trial-peak assembly torque magnitude (SI). |
+| `statistics.csv`, `summary_table.txt` | Lowest, average, and highest across trials for both areas and both trial-peak load magnitudes; CSV values use SI, text matches the console table. |
 | `progress.json` | Trial-by-trial status, peaks, and running ensemble averages while the study runs; marked complete after data export. |
 | `trials.csv` | Two assembly peak magnitudes, event times, conservative bounds, material/projected areas, contraction scale, and any geometry reuse for each trial (zero-based trial indices). |
 | `minute_envelope.csv` | Minute-by-minute maxima across the sampled patterns for the two assembly objectives, plus center sunlight fraction. This envelope can select different patterns at different minutes. |

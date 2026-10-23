@@ -42,6 +42,8 @@ def main(argv=None):
     parser.add_argument("--mc-dir", type=Path,
                         help="Report directory; default is a unique folder under output/monte_carlo")
     parser.add_argument("--mc-seed", type=int, default=2026)
+    parser.add_argument("--pb", action="store_true",
+                        help="Show a completed-trials progress bar instead of per-trial results")
     parser.add_argument("--mc-min-wrinkle", type=float, default=0,
                         help="Minimum sampled peak wrinkle height [m]; maximum is --wrinkle")
     duration = parser.add_mutually_exclusive_group()
@@ -80,8 +82,15 @@ def main(argv=None):
                 stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
                 args.mc_dir = Path('output/monte_carlo')/f'{config.sail_shape}_{stamp}_{os.getpid()}'
             print(f'Study reports: {args.mc_dir.resolve()}', flush=True)
-            result = run_study(config, settings, progress=lambda message: print(message, flush=True),
-                               checkpoint_dir=args.mc_dir)
+            from sail_dynamics.progress import TrialProgressBar
+            bar = TrialProgressBar() if args.pb else None
+            try:
+                result = run_study(config, settings, progress=lambda message: print(message, flush=True),
+                                   checkpoint_dir=args.mc_dir,
+                                   trial_progress=bar.update if bar is not None else None)
+            finally:
+                if bar is not None:
+                    bar.close()
         except ValueError as error:
             parser.error(str(error))
         result.export(args.mc_dir)
@@ -89,9 +98,6 @@ def main(argv=None):
         if args.no_gui or args.snapshot:
             matplotlib.use("Agg")
         save_figures(result, args.mc_dir)
-        for metric, peak in result.peaks.items():
-            print(f"Largest sampled {metric}: {peak['magnitude']:.9g} at {peak['utc']} "
-                  f"(trial {peak['trial']}, seed {peak['pattern_seed']}, height {peak['wrinkle_m']:.5g} m)")
         print(f"Saved study to {args.mc_dir.resolve()}. These are sampled maxima, not guaranteed upper limits.")
         if args.no_gui and not args.snapshot and not args.csv:
             return result

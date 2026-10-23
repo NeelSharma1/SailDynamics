@@ -23,6 +23,12 @@ METRICS = ('assembly_force_N', 'assembly_torque_Nm')
 AVERAGES_INTERPRETATION = ('Equal-weight arithmetic means across all trial rows, including reused '
                            'geometries and amplitude anchors. Force and torque are means of trial '
                            'peak magnitudes, not time-averaged loads.')
+STATISTIC_ROWS = (
+    ('total_material_area_m2', 'total_material_area_m2', 'Material area', 'm²', 1),
+    ('total_projected_area_m2', 'total_projected_area_m2', 'Planform area', 'm²', 1),
+    ('trial_peak_assembly_force_N', 'max_assembly_force_N', 'Trial peak force magnitude', 'µN', 1e6),
+    ('trial_peak_assembly_torque_Nm', 'max_assembly_torque_Nm', 'Trial peak torque magnitude', 'µN·m', 1e6),
+)
 
 
 def magnitudes(loads):
@@ -30,12 +36,17 @@ def magnitudes(loads):
                      (loads.forces_body, loads.torques_body)], axis=-1)
 
 
+def trial_statistics(trials):
+    statistics = {}
+    for key, field, *_ in STATISTIC_ROWS:
+        values = [row[field] for row in trials]
+        statistics[key] = {'lowest': float(np.min(values)), 'average': float(np.mean(values)),
+                           'highest': float(np.max(values))}
+    return statistics
+
+
 def trial_averages(trials):
-    values = {field: float(np.mean([row[field] for row in trials])) for field in
-              ('total_material_area_m2', 'total_projected_area_m2')}
-    values.update({'trial_peak_'+metric: float(np.mean([row['max_'+metric] for row in trials]))
-                   for metric in METRICS})
-    return values
+    return {key: values['average'] for key, values in trial_statistics(trials).items()}
 
 
 @dataclass(frozen=True)
@@ -93,6 +104,23 @@ class StudyResult:
     def averages(self):
         return trial_averages(self.trials)
 
+    @property
+    def statistics(self):
+        return trial_statistics(self.trials)
+
+    def summary_table(self):
+        lines = [f'Monte Carlo summary across {len(self.trials)} trials (membrane + hub)',
+                 f'Material area (constant): {SailBoundary(self.config).reference_area_m2:.9g} m²',
+                 f"{'Quantity':<32} {'Unit':<8} {'Lowest':>16} {'Average':>16} {'Highest':>16}",
+                 '-'*92]
+        statistics = self.statistics
+        for key, _, label, unit, scale in STATISTIC_ROWS[1:]:
+            values = statistics[key]
+            lines.append(f'{label:<32} {unit:<8} '+ ' '.join(
+                f'{values[stat]*scale:>16.9g}' for stat in ('lowest', 'average', 'highest')))
+        lines.append('Load rows compare each trial\'s instantaneous peak magnitude, not time averages.')
+        return '\n'.join(lines)
+
     def peak_window_times(self, metric='assembly_torque_Nm'):
         center = self.peaks[metric]['elapsed_seconds']
         start, end = max(0, center-60), min(self.minutes[-1], center+60)
@@ -126,6 +154,8 @@ class StudyResult:
                                     'with minimum/maximum amplitude anchor trials.',
             'peaks': self.peaks,
             'averages': self.averages,
+            'statistics': self.statistics,
+            'statistics_interpretation': 'Lowest, average, and highest across trial rows. '+AVERAGES_INTERPRETATION,
             'averages_interpretation': AVERAGES_INTERPRETATION,
             'bounds_over_sampled_patterns_and_epochs': {
                 metric: max(row['upper_bound_'+metric] for row in self.trials) for metric in METRICS},
@@ -134,6 +164,12 @@ class StudyResult:
                          for metric in METRICS} for q in (.5, .95, .99)},
         }
         (directory/'summary.json').write_text(json.dumps(summary, indent=2, allow_nan=False)+'\n')
+        (directory/'summary_table.txt').write_text(self.summary_table()+'\n')
+        with (directory/'statistics.csv').open('w', newline='') as stream:
+            writer = csv.writer(stream)
+            writer.writerow(['quantity_SI', 'lowest', 'average', 'highest'])
+            for key, values in self.statistics.items():
+                writer.writerow([key, *[values[stat] for stat in ('lowest', 'average', 'highest')]])
         with (directory/'averages.csv').open('w', newline='') as stream:
             writer = csv.DictWriter(stream, fieldnames=list(self.averages))
             writer.writeheader()
@@ -190,7 +226,8 @@ class StudyResult:
         return directory
 
 
-def run_study(config, settings=None, progress=None, checkpoint_dir=None):
+def run_study(config, settings=None, progress=None, checkpoint_dir=None, trial_progress=None):
+    """Evaluate trials; trial_progress(completed, total) replaces verbose trial messages."""
     settings = settings or StudySettings(max_wrinkle_m=config.wrinkle_m)
     duration = settings.duration_s(config)
     if duration > config.duration_s:
@@ -230,17 +267,22 @@ def run_study(config, settings=None, progress=None, checkpoint_dir=None):
                           'config': asdict(config), 'settings': asdict(settings),
                           'peaks': peaks, 'trials': trials,
                           'averages': trial_averages(trials),
+                          'statistics': trial_statistics(trials),
                           'averages_interpretation': AVERAGES_INTERPRETATION}
             temporary = directory/'progress.json.tmp'
             temporary.write_text(json.dumps(checkpoint, indent=2, allow_nan=False)+'\n')
             temporary.replace(directory/'progress.json')
-        if progress:
+        if trial_progress is not None:
+            trial_progress(len(trials), settings.trials)
+        elif progress:
             reuse = '' if row['reused_from_trial'] is None else f" Reused trial {row['reused_from_trial']+1}."
             progress(f"Trial {row['trial']+1}/{settings.trials}: height {row['wrinkle_m']:.4f} m; "
                      f"planform area (membrane + hub)={row['total_projected_area_m2']:.6f} m²; "
                      f"assembly peak F={row['max_assembly_force_N']*1e6:.3f} µN, "
                      f"|τ|={row['max_assembly_torque_Nm']*1e6:.3f} µN·m.{reuse}")
 
+    if trial_progress is not None:
+        trial_progress(0, settings.trials)
     for trial, (seed, amplitude) in enumerate(zip(seeds, amplitudes)):
         # At zero height every random seed yields exactly the same surface.
         key = ('flat',) if amplitude == 0 else (int(seed), float(amplitude))
@@ -304,16 +346,11 @@ def run_study(config, settings=None, progress=None, checkpoint_dir=None):
                 }
         geometry_cache[key] = row
         record(row)
+    result = StudyResult(config, settings, minutes, env.sunlight, envelope, trials, peaks,
+                         events, len(refinement), evaluated)
     if progress:
-        averages = trial_averages(trials)
-        progress(f'Ensemble average areas ({len(trials)} trials, membrane + hub): '
-                 f"material={averages['total_material_area_m2']:.6f} m²; "
-                 f"planform={averages['total_projected_area_m2']:.6f} m².")
-        progress('Ensemble average trial peaks (not time averages): '
-                 f"assembly |F|={averages['trial_peak_assembly_force_N']*1e6:.6f} µN; "
-                 f"|τ|={averages['trial_peak_assembly_torque_Nm']*1e6:.6f} µN·m.")
-    return StudyResult(config, settings, minutes, env.sunlight, envelope, trials, peaks,
-                       events, len(refinement), evaluated)
+        progress(result.summary_table())
+    return result
 
 
 def save_figures(result, directory):
